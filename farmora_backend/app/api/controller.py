@@ -155,9 +155,13 @@ async def chat_endpoint(payload: ChatInput, background_tasks: BackgroundTasks):
         if not user_profile:
             raise HTTPException(status_code=500, detail="Failed to create user profile")
         
+        import uuid
+        chat_id = payload.chat_id or str(uuid.uuid4())
+
         # 2. Initialize state for LangGraph
         initial_state = {
             "user_id": payload.user_id,
+            "chat_id": str(chat_id),
             "message": payload.text_message,
             "image": payload.crop_image,
             "intent": "",
@@ -169,7 +173,7 @@ async def chat_endpoint(payload: ChatInput, background_tasks: BackgroundTasks):
         }
         
         # 3. Run AI Graph
-        logger.info(f"Processing chat for user {payload.user_id}: {payload.text_message[:50]}...")
+        logger.info(f"Processing chat for user {payload.user_id} [chat_id: {chat_id}]: {payload.text_message[:50]}...")
         final_state = await farmora_ai.ainvoke(initial_state, user_profile)
         
         # 4. Save history in background
@@ -179,7 +183,8 @@ async def chat_endpoint(payload: ChatInput, background_tasks: BackgroundTasks):
             payload.text_message,
             final_state["response"],
             final_state["intent"],
-            {"image": bool(payload.crop_image), "confidence": final_state.get("confidence", 0)}
+            {"image": bool(payload.crop_image), "confidence": final_state.get("confidence", 0)},
+            str(chat_id)
         )
         
         # 5. Build response with proper schema
@@ -231,6 +236,7 @@ async def chat_endpoint(payload: ChatInput, background_tasks: BackgroundTasks):
         return ChatResponse(
             ai_response=final_state["response"],
             intent=final_state["intent"],
+            chat_id=str(chat_id),
             planner_suggestions=planner_suggestions if planner_suggestions else None,
             disease_result=disease_result,
             dashboard_data=dashboard_data,
@@ -240,6 +246,37 @@ async def chat_endpoint(payload: ChatInput, background_tasks: BackgroundTasks):
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.get("/chat/history/{user_id}")
+async def get_chat_history(user_id: str, chat_id: str = None, limit: int = 20):
+    """
+    Retrieve stored chat history for a user from MongoDB, optionally filtered by chat_id.
+    """
+    try:
+        from farmora_backend.app.services.chat_service import get_user_chat_history
+        chats = await get_user_chat_history(user_id, chat_id=chat_id, limit=limit)
+        
+        normalized = []
+        for c in chats:
+            normalized.append({
+                "chat_id": c.get("chat_id"),
+                "user_id": c.get("user_id"),
+                "user_message": c.get("user_message"),
+                "ai_response": c.get("ai_response"),
+                "intent": c.get("intent"),
+                "metadata": c.get("metadata", {}),
+                "timestamp": c.get("timestamp").isoformat() if isinstance(c.get("timestamp"), datetime) else str(c.get("timestamp", ""))
+            })
+            
+        return {
+            "user_id": user_id,
+            "total": len(normalized),
+            "history": reversed(normalized)  # Chronological order
+        }
+    except Exception as e:
+        logger.error(f"Error fetching chat history endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch chat history")
 
 
 # ===== TASK CONFIRMATION ENDPOINTS =====

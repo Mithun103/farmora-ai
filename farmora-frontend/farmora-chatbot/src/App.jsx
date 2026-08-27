@@ -53,7 +53,13 @@ function App() {
       const savedHistory = localStorage.getItem(getChatHistoryKey(user.user_id));
       if (savedHistory) {
         try {
-          setChatHistory(JSON.parse(savedHistory));
+          const parsedHistory = JSON.parse(savedHistory);
+          setChatHistory(parsedHistory);
+          if (parsedHistory.length > 0 && messages.length === 0) {
+            const mostRecent = parsedHistory[0];
+            setMessages(mostRecent.messages || []);
+            setActiveChatId(mostRecent.id);
+          }
         } catch (e) {
           console.error('Failed to load chat history:', e);
           setChatHistory([]);
@@ -64,12 +70,39 @@ function App() {
     }
   }, [user?.user_id]);
 
-  // Save chat history to localStorage whenever it changes
+  // Sync active messages to chatHistory and localStorage automatically
   useEffect(() => {
-    if (user?.user_id && chatHistory.length > 0) {
-      localStorage.setItem(getChatHistoryKey(user.user_id), JSON.stringify(chatHistory));
+    if (user?.user_id && messages.length > 0) {
+      const chatId = activeChatId || Date.now();
+      if (!activeChatId) setActiveChatId(chatId);
+
+      const firstUserMsg = messages.find(m => m.sender === 'user');
+      const chatName = firstUserMsg
+        ? (firstUserMsg.text && firstUserMsg.text.length > 30 ? firstUserMsg.text.substring(0, 30) + '...' : (firstUserMsg.text || 'Image Chat'))
+        : `Chat ${new Date().toLocaleDateString()}`;
+
+      const updatedEntry = {
+        id: chatId,
+        name: chatName,
+        messages: messages,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      setChatHistory(prev => {
+        const existingIndex = prev.findIndex(c => c.id === chatId);
+        let newHistory;
+        if (existingIndex >= 0) {
+          newHistory = [...prev];
+          newHistory[existingIndex] = updatedEntry;
+        } else {
+          newHistory = [updatedEntry, ...prev].slice(0, 10);
+        }
+        localStorage.setItem(getChatHistoryKey(user.user_id), JSON.stringify(newHistory));
+        return newHistory;
+      });
     }
-  }, [chatHistory, user?.user_id]);
+  }, [messages, user?.user_id]);
 
   // Check if user is already logged in
   useEffect(() => {
@@ -125,6 +158,7 @@ function App() {
         const userData = JSON.parse(savedUser);
         userData.language = langCode;
         localStorage.setItem('farmora_user', JSON.stringify(userData));
+        setUser(userData);
       }
     } catch (error) {
       console.error('Failed to update language preference:', error);
@@ -133,6 +167,9 @@ function App() {
 
   const handleSendMessage = async () => {
     if (!inputText.trim()) return;
+
+    const currentChatId = activeChatId || Date.now();
+    if (!activeChatId) setActiveChatId(currentChatId);
 
     const userMessage = {
       id: Date.now(),
@@ -151,7 +188,8 @@ function App() {
         user.user_id,
         inputText,
         null,
-        null
+        null,
+        currentChatId
       );
 
       const agentMessage = {
@@ -217,6 +255,8 @@ function App() {
     reader.onload = async (e) => {
       const base64Image = e.target.result;
       const caption = `Image uploaded: ${file.name}`;
+      const currentChatId = activeChatId || Date.now();
+      if (!activeChatId) setActiveChatId(currentChatId);
 
       const userMessage = {
         id: Date.now(),
@@ -235,7 +275,8 @@ function App() {
           user.user_id,
           'Please analyze this crop image',
           base64Image,
-          caption
+          caption,
+          currentChatId
         );
 
         const agentMessage = {
@@ -407,17 +448,9 @@ function App() {
     }
   };
 
-  // Get available languages (preferred language first, then English)
+  // Get available languages (return all 10 supported languages)
   const getAvailableLanguages = () => {
-    const preferredLang = user?.language || 'en';
-    // If preferred is English, just return English
-    if (preferredLang === 'en') {
-      return LANGUAGES.filter(l => l.code === 'en');
-    }
-    // Otherwise return preferred language first, then English
-    const preferred = LANGUAGES.find(l => l.code === preferredLang);
-    const english = LANGUAGES.find(l => l.code === 'en');
-    return [preferred, english].filter(Boolean);
+    return LANGUAGES;
   };
 
   // Get current language display name
@@ -485,7 +518,7 @@ function App() {
 
       <div className="flex-1 flex flex-col">
         {/* Top Bar - Premium Design */}
-        <div className="h-14 bg-gray-900/80 backdrop-blur-sm border-b border-green-800/30 flex items-center justify-between px-4 md:px-6">
+        <div className="relative z-20 h-14 bg-gray-900/80 backdrop-blur-sm border-b border-green-800/30 flex items-center justify-between px-4 md:px-6">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}

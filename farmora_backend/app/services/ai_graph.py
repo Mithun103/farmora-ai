@@ -18,6 +18,7 @@ gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 # --- State Definition ---
 class FarmoraState(TypedDict):
     user_id: str
+    chat_id: Optional[str]
     message: str
     image: Optional[str]
     intent: str
@@ -29,19 +30,33 @@ class FarmoraState(TypedDict):
     user_profile: Optional[Dict[str, Any]]  # User-specific profile data
 
 
-def call_gemini(prompt: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 1000) -> str:
-    """Helper function to call Gemini API."""
+import time
+
+def call_gemini(prompt: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 1000, retries: int = 3) -> str:
+    """Helper function to call Gemini API with automatic rate-limit retry."""
     full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
     
-    response = gemini_client.models.generate_content(
-        model=settings.GEMINI_MODEL,
-        contents=full_prompt,
-        config=genai.types.GenerateContentConfig(
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-        )
-    )
-    return response.text if response.text else ""
+    for attempt in range(retries):
+        try:
+            response = gemini_client.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents=full_prompt,
+                config=genai.types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                )
+            )
+            return response.text if response.text else ""
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                if attempt < retries - 1:
+                    wait_time = (attempt + 1) * 3
+                    logger.warning(f"⚠️ Gemini 429 rate limit hit, retrying in {wait_time}s... (attempt {attempt+1}/{retries})")
+                    time.sleep(wait_time)
+                    continue
+            logger.error(f"Gemini API call failed: {e}")
+            raise
+    return ""
 
 
 # --- NODES ---
@@ -122,9 +137,11 @@ async def detect_intent_node(state: FarmoraState) -> FarmoraState:
             logger.info(f"Intent: dashboard_query (keyword match)")
             return state
 
-        # Use Gemini for ambiguous cases with improved prompt
+        # Use Gemini for ambiguous cases with conversation history context
+        history_context = await get_context_from_history(state["user_id"], chat_id=state.get("chat_id"), limit=5)
+        
         system_prompt = """You are an intent classification expert for agricultural AI.
-Analyze the user message and classify into ONE category with absolute certainty.
+Analyze the user message and previous conversation context, then classify into ONE category with absolute certainty.
 
 Categories:
 - 'disease_detection': ANY questions about crop diseases, symptoms, pest issues, plant health problems, dying/yellowing/wilting plants, treatment/remedy requests, crop damage reports
@@ -133,6 +150,7 @@ Categories:
 - 'general_chat': General farming advice, Q&A, tips, techniques, best practices, learning, greetings
 
 Rules:
+- Consider previous conversation context to resolve follow-up questions (e.g., "how much of that?", "when should I spray?")
 - If message mentions ANY plant symptoms (color change, wilting, spots, holes, etc.) = 'disease_detection'
 - If asking for treatment, cure, remedy, spray, pesticide = 'disease_detection'
 - If message says "my crop", "my plant" with concern/worry = 'disease_detection'
@@ -143,7 +161,8 @@ Rules:
 
 Respond with ONLY the category name in lowercase, nothing else."""
         
-        intent = call_gemini(state["message"], system_prompt, temperature=0.1, max_tokens=20)
+        prompt = f"Previous Chat History:\n{history_context}\n\nCurrent User Message: {state['message']}" if history_context else state["message"]
+        intent = call_gemini(prompt, system_prompt, temperature=0.1, max_tokens=20)
         intent = intent.strip().lower().replace("'", "").replace('"', "") if intent else "general_chat"
         
         # Validate intent
@@ -175,8 +194,14 @@ async def disease_detection_node(state: FarmoraState) -> FarmoraState:
         crops = ', '.join(user_profile.get('crops', [])) if user_profile.get('crops') else 'your crops'
         location = user_profile.get('farm_location', 'your location')
         
+        # Get conversation history for context
+        history_context = await get_context_from_history(state["user_id"], chat_id=state.get("chat_id"), limit=5)
+        
         # Format response using Gemini with empathy and actionable advice
         format_prompt = f"""You are Farmora AI, helping a farmer at {location} who grows {crops}.
+
+Previous Conversation Context:
+{history_context if history_context else "No previous conversation"}
 
 Disease Analysis Results:
 - Disease Identified: {result.get('label', 'Unknown')}
@@ -266,7 +291,7 @@ async def planner_node(state: FarmoraState) -> FarmoraState:
         
         # Get conversation history for context (user-specific)
         from farmora_backend.app.services.chat_service import get_context_from_history
-        context = await get_context_from_history(state["user_id"], limit=5)
+        context = await get_context_from_history(state["user_id"], chat_id=state.get("chat_id"), limit=5)
         
         # Get user's preferred language
         language = user_profile.get("language", "en")
@@ -406,8 +431,13 @@ async def dashboard_node(state: FarmoraState) -> FarmoraState:
                 logger.warning(f"Market news fetch failed: {me}")
                 market_news_text = "📰 Market news temporarily unavailable"
         
+        # Fetch conversation history context
+        history_context = await get_context_from_history(state["user_id"], chat_id=state.get("chat_id"), limit=5)
+
         # Build context-aware prompt
         context_parts = []
+        if history_context:
+            context_parts.append(f"Previous Conversation History:\n{history_context}")
         if weather_text:
             context_parts.append(f"Weather Information:\n{weather_text}")
         if market_news_text:
@@ -457,7 +487,7 @@ async def general_chat_node(state: FarmoraState) -> FarmoraState:
         user_profile = state.get("user_profile") or {}
         
         # Get conversation context from history (user-specific)
-        context = await get_context_from_history(state["user_id"], limit=8)
+        context = await get_context_from_history(state["user_id"], chat_id=state.get("chat_id"), limit=8)
         
         # Get user's preferred language
         language = user_profile.get("language", "en")

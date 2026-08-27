@@ -81,43 +81,64 @@ async def fetch_weather_data(lat: float, lon: float) -> Dict[str, Any]:
 
 async def fetch_and_process_market_data():
     """
-    Background Job: Fetches real market data and uses Gemini AI to summarize.
+    Background Job: Fetches real market data from NewsAPI.org or Apitube and uses Gemini AI to summarize.
     """
     logger.info("🔄 [Background Job] Fetching and analyzing market news...")
     
     market_news = []
+    articles = []
+    source_used = "newsapi"
+
     try:
         async with httpx.AsyncClient() as client_http:
-            response = await client_http.get(
-                NEWS_API_URL,
-                params={
-                    "api_key": API_KEY,
-                    "per_page": 10,
-                    "category.id": "medtop:20000210",
-                    "language.code": "en",
-                    "source.country.code": "in"
-                },
-                timeout=15.0
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                logger.info(f"📰 [Background Job] API Response keys: {list(data.keys())}")
-                
-                if data.get("errors"):
-                    logger.warning(f"⚠️ [Background Job] API Error: {data.get('errors')}")
-                    return  # Exit gracefully
-                
-                results = data.get("results", [])
-                logger.info(f"📰 [Background Job] Found {len(results)} articles")
-                
-                if results:
-                    market_news = await _ai_summarize_news(results)
-                    logger.info(f"🔍 [Background Job] AI processed {len(market_news)} relevant items")
+            # 1. Try NewsAPI.org first
+            try:
+                response = await client_http.get(
+                    "https://newsapi.org/v2/everything",
+                    params={
+                        "apiKey": API_KEY,
+                        "q": "agriculture OR farming OR crops OR paddy",
+                        "pageSize": 10,
+                        "language": "en"
+                    },
+                    headers={"User-Agent": "FarmoraAI/1.0"},
+                    timeout=12.0
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    articles = data.get("articles", [])
+                    source_used = "newsapi.org"
                 else:
-                    logger.warning("⚠️ [Background Job] No results from News API")
-                    return  # Exit gracefully
-                
+                    logger.warning(f"⚠️ NewsAPI.org returned status {response.status_code}, trying Apitube...")
+            except Exception as e:
+                logger.warning(f"⚠️ NewsAPI.org request failed: {e}")
+
+            # 2. Fallback to Apitube.io if NewsAPI.org returned no results or failed
+            if not articles:
+                try:
+                    response = await client_http.get(
+                        NEWS_API_URL,
+                        params={
+                            "api_key": API_KEY,
+                            "per_page": 10,
+                            "category.id": "medtop:20000210",
+                            "language.code": "en",
+                            "source.country.code": "in"
+                        },
+                        timeout=12.0
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        articles = data.get("results", [])
+                        source_used = "apitube.io"
+                except Exception as e:
+                    logger.warning(f"⚠️ Apitube request failed: {e}")
+
+            if articles:
+                logger.info(f"📰 [Background Job] Found {len(articles)} articles from {source_used}")
+                market_news = await _ai_summarize_news(articles)
+                logger.info(f"🔍 [Background Job] AI processed {len(market_news)} relevant items")
+
                 # Save to MongoDB
                 await db.db.dashboard_data.update_one(
                     {"type": "market_news"},
@@ -125,16 +146,16 @@ async def fetch_and_process_market_data():
                         "$set": {
                             "data": market_news,
                             "last_updated": datetime.utcnow(),
-                            "source": "apitube"
+                            "source": source_used
                         }
                     },
                     upsert=True
                 )
                 logger.info(f"✅ [Background Job] Stored {len(market_news)} relevant news items.")
             else:
-                logger.warning(f"⚠️ [Background Job] API returned status {response.status_code}")
-                return  # Exit gracefully
-                
+                logger.warning("⚠️ [Background Job] Unable to fetch articles from news providers. Will retry later.")
+                return
+
     except httpx.ConnectTimeout:
         logger.warning("⚠️ [Background Job] Connection timeout - news API may be unreachable. Will retry later.")
     except httpx.ConnectError as ce:
@@ -365,23 +386,24 @@ async def generate_weather_insights(user_profile: Optional[Dict] = None, languag
 - Conditions: {weather_data['description']}
 - Cloud Cover: {weather_data['clouds']}%
 
-Provide brief, actionable farming advice for today in 2-3 sentences in {lang_name} language. Focus on:
+Provide clear, actionable farming advice for today in 2-3 concise sentences in {lang_name} language. Focus on:
 1. What farming activities are ideal today
 2. Any precautions needed
 3. Irrigation recommendations
 
-IMPORTANT: Respond ONLY in {lang_name} language."""    
+IMPORTANT: Respond ONLY in {lang_name} language. Make sure the advice is complete and ends with a full sentence."""    
 
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=weather_prompt,
-            config=genai.types.GenerateContentConfig(
-                temperature=0.7,
-                max_output_tokens=400,
-            )
-        )
-        
-        weather_data["ai_insights"] = response.text
+        try:
+            from farmora_backend.app.services.ai_graph import call_gemini
+            ai_text = call_gemini(weather_prompt, temperature=0.7, max_tokens=1200)
+            if ai_text:
+                weather_data["ai_insights"] = ai_text.strip()
+            else:
+                weather_data["ai_insights"] = f"Current temperature is {weather_data['temperature']}°C with {weather_data['description']}. Ensure proper crop monitoring and adjust irrigation based on soil moisture."
+        except Exception as ge:
+            logger.warning(f"Gemini weather insight generation fallback: {ge}")
+            weather_data["ai_insights"] = f"Current temperature is {weather_data['temperature']}°C with {weather_data['description']}. Ensure proper crop monitoring and adjust irrigation based on soil moisture."
+
         return weather_data
         
     except Exception as e:

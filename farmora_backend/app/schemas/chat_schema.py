@@ -56,6 +56,7 @@ class ChatInput(BaseModel):
     text_message: str
     crop_image: Optional[str] = None  # Base64 encoded image
     caption: Optional[str] = None
+    chat_id: Optional[str] = None
 
 # ===== PLANNER SCHEMAS =====
 
@@ -108,6 +109,7 @@ class DashboardData(BaseModel):
 class ChatResponse(BaseModel):
     ai_response: str
     intent: str
+    chat_id: Optional[str] = None
     planner_suggestions: Optional[List[PlannerSuggestion]] = None
     disease_result: Optional[DiseaseDetectionResult] = None
     dashboard_data: Optional[DashboardData] = None

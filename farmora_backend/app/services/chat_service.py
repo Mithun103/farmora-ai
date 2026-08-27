@@ -8,11 +8,12 @@ logger = logging.getLogger(__name__)
 
 
 async def save_chat_history(user_id: str, user_message: str, ai_response: str, 
-                           intent: str, metadata: Optional[Dict] = None) -> bool:
-    """Save chat interaction to MongoDB."""
+                           intent: str, metadata: Optional[Dict] = None,
+                           chat_id: Optional[str] = None) -> bool:
+    """Save chat interaction to MongoDB, associated with a specific chat_id."""
     try:
         chat_entry = {
-            "chat_id": str(uuid.uuid4()),
+            "chat_id": str(chat_id) if chat_id else str(uuid.uuid4()),
             "user_id": user_id,
             "user_message": user_message,
             "ai_response": ai_response,
@@ -22,19 +23,21 @@ async def save_chat_history(user_id: str, user_message: str, ai_response: str,
         }
         
         await db.db.chat_history.insert_one(chat_entry)
-        logger.info(f"Chat saved for user {user_id}")
+        logger.info(f"Chat saved for user {user_id} [chat_id: {chat_entry['chat_id']}]")
         return True
     except Exception as e:
         logger.error(f"Error saving chat history: {e}")
         return False
 
 
-async def get_user_chat_history(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Retrieve recent chat history for a user."""
+async def get_user_chat_history(user_id: str, chat_id: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    """Retrieve chat history for a user, optionally filtered by chat_id."""
     try:
-        chats = await db.db.chat_history.find(
-            {"user_id": user_id}
-        ).sort("timestamp", -1).to_list(limit)
+        query = {"user_id": user_id}
+        if chat_id:
+            query["chat_id"] = str(chat_id)
+
+        chats = await db.db.chat_history.find(query).sort("timestamp", -1).to_list(limit)
         return chats
     except Exception as e:
         logger.error(f"Error retrieving chat history: {e}")
@@ -82,10 +85,12 @@ async def update_user_profile(user_id: str, updates: Dict[str, Any]) -> bool:
         return False
 
 
-async def get_context_from_history(user_id: str, limit: int = 5) -> str:
-    """Build context from recent chat history for LLM."""
+async def get_context_from_history(user_id: str, chat_id: Optional[str] = None, limit: int = 5) -> str:
+    """Build context from chat history for a specific chat_id for LLM."""
     try:
-        chats = await get_user_chat_history(user_id, limit)
+        if not chat_id:
+            return ""
+        chats = await get_user_chat_history(user_id, chat_id=chat_id, limit=limit)
         context = ""
         for chat in reversed(chats):  # Most recent last
             context += f"User: {chat.get('user_message', '')}\nAssistant: {chat.get('ai_response', '')}\n\n"

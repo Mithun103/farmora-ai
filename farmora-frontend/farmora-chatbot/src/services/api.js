@@ -104,7 +104,7 @@ class APIService {
 
   // ===== CHAT ENDPOINT =====
   
-  async sendMessage(userId, textMessage, cropImage = null, caption = null) {
+  async sendMessage(userId, textMessage, cropImage = null, caption = null, chatId = null) {
     try {
       const response = await fetch(`${API_BASE_URL}/chat`, {
         method: 'POST',
@@ -113,7 +113,8 @@ class APIService {
           user_id: userId,
           text_message: textMessage,
           crop_image: cropImage,
-          caption: caption
+          caption: caption,
+          chat_id: chatId ? String(chatId) : undefined
         })
       });
 
@@ -125,6 +126,22 @@ class APIService {
       return await response.json();
     } catch (error) {
       console.error('Chat error:', error);
+      throw error;
+    }
+  }
+
+  async getChatHistory(userId, chatId = null) {
+    try {
+      const url = new URL(`${API_BASE_URL}/chat/history/${userId}`);
+      if (chatId) url.searchParams.append('chat_id', String(chatId));
+
+      const response = await fetch(url.toString(), {
+        headers: this.getAuthHeaders()
+      });
+      if (!response.ok) throw new Error('Failed to fetch chat history');
+      return await response.json();
+    } catch (error) {
+      console.error('Chat history fetch error:', error);
       throw error;
     }
   }

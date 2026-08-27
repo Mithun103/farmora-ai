@@ -20,5 +20,5 @@ class Settings:
     
     # Model Configuration
     WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "whisper-large-v3-turbo")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemma-3-27b-it")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 settings = Settings()
